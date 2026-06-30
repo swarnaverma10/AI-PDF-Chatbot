@@ -176,3 +176,44 @@ Control verbosity with the `LOG_LEVEL` environment variable
 2. Follow the existing code style (docstrings, type hints, structured logging).
 3. Run the test suite before opening a PR: `pytest tests/`.
 4. Keep each PR focused on a single concern.
+
+---
+
+## Hugging Face Spaces Deployment (Docker)
+
+To deploy the FastAPI backend on Hugging Face Spaces using the provided `Dockerfile`:
+
+### 1 – Create a new Space
+1. Log in to [Hugging Face](https://huggingface.co/) and click on **New Space**.
+2. Give your Space a name.
+3. Select **Docker** as the SDK (instead of Streamlit or Gradio).
+4. Choose the **Blank** template (the Space will be configured entirely by the `Dockerfile`).
+5. Choose your Space visibility (Public/Private).
+
+### 2 – Configure Secrets (Hugging Face settings)
+Do not commit sensitive keys like OpenRouter API keys to the repository. Instead, configure them as Secrets:
+1. Navigate to your Space's **Settings** tab.
+2. Go to the **Variables and Secrets** section.
+3. Click on **New Secret** and add:
+   * **Key**: `OPENROUTER_API_KEY`
+   * **Value**: *Your actual OpenRouter API Key*
+
+Other environment variables (like `LOG_LEVEL` or `OPENROUTER_MODEL`) can be added as Variables or Secrets in the same tab.
+
+### 3 – Push files to the Space repository
+You can either clone the space repository locally and copy the contents of the `backend/` directory into it, or configure git to push directly:
+
+```bash
+# Push the backend directory contents to the Hugging Face Space repo:
+# (Ensure Dockerfile, app/, and knowledge_base/ are at the root level of the Space)
+git remote add hf https://huggingface.co/spaces/<your-username>/<your-space-name>
+git push hf main
+```
+
+Hugging Face will automatically detect the `Dockerfile`, build a lightweight image, expose it on port `7860`, and deploy your backend.
+
+### 4 – Accessing the API
+Once the build completes successfully and shows **Running**, you can find the direct API URL under the Space embed options. The API endpoints will be accessible at:
+* API Root: `https://<your-username>-<your-space-name>.hf.space/`
+* Swagger Docs: `https://<your-username>-<your-space-name>.hf.space/docs`
+
