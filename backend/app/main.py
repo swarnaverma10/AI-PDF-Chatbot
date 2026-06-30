@@ -3,12 +3,17 @@ main.py
 -------
 FastAPI application entry point for the AI PDF Chatbot backend.
 
-Phase 1 – FastAPI Foundation:
+Sprint 1 – FastAPI Foundation:
   * Application factory with lifespan context manager.
   * CORS middleware configured for Unity development.
   * GET /        → welcome message.
   * GET /health  → service health check.
   * Structured logging throughout.
+
+Sprint 2 – PDF Ingestion:
+  * PDF knowledge base loaded once at startup via pdf_reader.load_pdf().
+  * Extracted text cached in memory for zero-latency access.
+  * FileNotFoundError handled gracefully – server still starts.
 """
 
 import logging
@@ -24,6 +29,7 @@ from fastapi.responses import JSONResponse
 from app.config import get_settings
 from app.models import ErrorResponse, HealthResponse, WelcomeResponse
 from app.utils import setup_logging, utc_now
+import app.pdf_reader as pdf_reader
 
 # ------------------------------------------------------------------ #
 # Bootstrap logging before anything else runs.                        #
@@ -45,8 +51,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     FastAPI lifespan context manager.
 
-    Code before ``yield`` runs on startup; code after ``yield`` runs on
-    shutdown.  Phase 2+ will initialise the PDF index and HTTP client here.
+    Startup sequence
+    ----------------
+    1. Log application boot metadata.
+    2. Load and cache the PDF knowledge base (Sprint 2).
+       - FileNotFoundError → logged as CRITICAL; server still starts so
+         the /health endpoint remains reachable for diagnostics.
+       - Any other exception → re-raised, which aborts startup.
+
+    Shutdown sequence
+    -----------------
+    1. Log shutdown message.
+    Sprint 3+ will close any open HTTP clients here.
     """
     logger.info(
         "Starting %s v%s | debug=%s",
@@ -56,15 +72,31 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     logger.info("Allowed CORS origins: %s", _settings.ALLOWED_ORIGINS)
 
-    # ---- Phase 2+ hooks go here ------------------------------------ #
-    # e.g. await pdf_reader.init()
+    # ---- Sprint 2: Load PDF knowledge base ------------------------- #
+    try:
+        pdf_reader.load_pdf(_settings.KNOWLEDGE_BASE_PATH)
+    except FileNotFoundError as exc:
+        # Non-fatal: log clearly and continue so /health stays up.
+        logger.critical(
+            "PDF knowledge base could not be loaded: %s  "
+            "Chat endpoints will be unavailable until the file is present "
+            "and the server is restarted.",
+            exc,
+        )
+    except Exception as exc:
+        # Fatal: unexpected error during PDF parsing – abort startup.
+        logger.exception("Unexpected error while loading PDF: %s", exc)
+        raise
+    # ---------------------------------------------------------------- #
+
+    # ---- Sprint 3+ hooks go here ----------------------------------- #
     # e.g. openrouter_client = httpx.AsyncClient(...)
     # ---------------------------------------------------------------- #
 
     yield  # Application is running
 
     logger.info("Shutting down %s …", _settings.APP_NAME)
-    # ---- Phase 2+ cleanup goes here -------------------------------- #
+    # ---- Sprint 3+ cleanup goes here ------------------------------- #
     # e.g. await openrouter_client.aclose()
     # ---------------------------------------------------------------- #
 
@@ -173,10 +205,21 @@ def _register_routes(app: FastAPI) -> None:
         Returns ``{"status": "healthy"}`` together with the current
         application version and a UTC timestamp.  Use this endpoint for
         load-balancer / container orchestration health probes.
+
+        The ``status`` field reflects PDF readiness:
+        - ``"healthy"``         – server up, PDF loaded.
+        - ``"degraded"``        – server up, PDF not yet loaded
+                                  (missing file or startup error).
         """
         logger.debug("GET /health called")
+        pdf_ready = pdf_reader.is_pdf_loaded()
+        status_str = "healthy" if pdf_ready else "degraded"
+        if not pdf_ready:
+            logger.warning(
+                "Health check returning 'degraded': PDF knowledge base is not loaded."
+            )
         return HealthResponse(
-            status="healthy",
+            status=status_str,
             version=_settings.APP_VERSION,
             timestamp=utc_now(),
         )
