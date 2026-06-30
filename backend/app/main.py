@@ -22,14 +22,15 @@ from datetime import timezone, datetime
 from typing import AsyncIterator
 
 import uvicorn
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.models import ErrorResponse, HealthResponse, WelcomeResponse
-from app.utils import setup_logging, utc_now
+from app.models import ErrorResponse, HealthResponse, WelcomeResponse, ChatRequest, ChatResponse
+from app.utils import setup_logging, utc_now, sanitise_question
 import app.pdf_reader as pdf_reader
+import app.chatbot as chatbot
 
 # ------------------------------------------------------------------ #
 # Bootstrap logging before anything else runs.                        #
@@ -136,13 +137,34 @@ def create_app() -> FastAPI:
     )
 
     # ---------------------------------------------------------------- #
-    # Global exception handler                                          #
-    # Returns a structured ErrorResponse for any unhandled exception.   #
+    # Exception handlers                                               #
     # ---------------------------------------------------------------- #
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(
+        request: Request, exc: HTTPException
+    ) -> JSONResponse:
+        if exc.status_code == 400:
+            err_type = "bad_request"
+        elif exc.status_code == 503:
+            err_type = "service_unavailable"
+        else:
+            err_type = "http_error"
+
+        error = ErrorResponse(
+            error=err_type,
+            detail=exc.detail,
+            timestamp=utc_now(),
+        )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error.model_dump(mode="json"),
+        )
+
     @app.exception_handler(Exception)
     async def global_exception_handler(
         request: Request, exc: Exception
     ) -> JSONResponse:
+
         logger.exception(
             "Unhandled exception on %s %s",
             request.method,
@@ -223,6 +245,86 @@ def _register_routes(app: FastAPI) -> None:
             version=_settings.APP_VERSION,
             timestamp=utc_now(),
         )
+
+    @app.post(
+        "/chat",
+        response_model=ChatResponse,
+        summary="Chat with PDF Knowledge Base",
+        tags=["Chat"],
+        responses={
+            status.HTTP_400_BAD_REQUEST: {"model": ErrorResponse},
+            status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+            status.HTTP_500_INTERNAL_SERVER_ERROR: {"model": ErrorResponse},
+        },
+    )
+    async def chat(request: ChatRequest) -> ChatResponse:
+        """
+        Ask a question based on the cached PDF knowledge base.
+        
+        The endpoint will sanitise input, validate that it is not empty,
+        and call the OpenRouter integration to produce a response.
+        """
+        import time
+        import asyncio
+
+        # Log incoming request (avoid raw print, print summary)
+        logger.info(
+            "POST /chat | question_len=%d | session_id=%s",
+            len(request.question),
+            request.session_id,
+        )
+
+        # Trim leading/trailing spaces and collapse whitespaces
+        sanitised_question = sanitise_question(request.question)
+
+        # Validate that the question is not empty
+        if not sanitised_question:
+            logger.warning("POST /chat | validation failed | empty question")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Question cannot be empty or whitespace-only.",
+            )
+
+        start_time = time.perf_counter()
+
+        try:
+            # Run the synchronous chatbot API call inside a thread pool
+            # to keep the FastAPI main async event loop fully responsive.
+            answer = await asyncio.to_thread(chatbot.get_answer, sanitised_question)
+
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info("POST /chat | success | elapsed_ms=%.2f", elapsed)
+
+            return ChatResponse(
+                answer=answer,
+                session_id=request.session_id,
+                sources=[],  # Sources to be implemented in a later phase if required
+                timestamp=utc_now(),
+            )
+
+        except RuntimeError as exc:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.error(
+                "POST /chat | chatbot/AI service error | elapsed_ms=%.2f | error=%s",
+                elapsed,
+                exc,
+            )
+            # Map all chatbot/pdf/API runtime errors to 503 Service Unavailable
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            )
+
+        except Exception as exc:
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.exception(
+                "POST /chat | unhandled exception | elapsed_ms=%.2f",
+                elapsed,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="An unexpected error occurred. Please try again later.",
+            )
 
 
 # ============================================================ #

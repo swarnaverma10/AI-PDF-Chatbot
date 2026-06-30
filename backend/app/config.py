@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Logging
     # ------------------------------------------------------------------ #
     LOG_LEVEL: str = "INFO"
+    
+    # ---- Request Timeout (Phase 3+) ------------------------------------- #
+    REQUEST_TIMEOUT: float = 30.0
 
     # Pydantic-settings v2 configuration
     model_config = SettingsConfigDict(
